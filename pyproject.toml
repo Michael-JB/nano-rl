@@ -1,0 +1,21 @@
+[project]
+name = "nano-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.8.0",
+    "transformers>=4.56.2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pytest>=8.4.2",
+    "ruff>=0.13.3",
+]
+
+[tool.mypy]
+strict = "True"
+disable_error_code = ["no-untyped-call"]
