@@ -11,9 +11,9 @@ PROMPT = "What number between 0 and 9 am I thinking of right now? Answer only wi
 ROLLOUT_COUNT = 10
 
 
-# A simple reward to favour 7
-def seven_reward(response: str) -> int:
-    return 1 if "7" in response else 0
+# A simple reward to favour 3
+def three_reward(response: str) -> int:
+    return 1 if "3" in response else 0
 
 
 def rollout(
@@ -39,18 +39,17 @@ def rollout(
     return [complete() for _ in range(count)]
 
 
-def compute_loss(
+def rollout_loss(
     tokenizer: PreTrainedTokenizer,
     model: PreTrainedModel,
     completions: list[tuple[torch.Tensor, list[bool]]],
 ) -> torch.Tensor:
-    # Currently not batched for simplicity
-    losses = torch.zeros(len(completions))
-    for i, (completion, mask) in enumerate(completions):
+    def completion_loss(completion: torch.Tensor, mask: list[bool]) -> torch.Tensor:
+        # for i, (completion, mask) in enumerate(completions):
         # Compute reward (we skip special tokens to strip the EOS token)
         response = completion[mask]
         response_text = tokenizer.decode(response, skip_special_tokens=True)
-        reward = seven_reward(response_text)
+        reward = three_reward(response_text)
 
         # A tensor with (log) probability distributions over the next token for
         # each sequence position. We truncate the final one as it doesn't make
@@ -73,9 +72,13 @@ def compute_loss(
 
         response_log_probs_sum = response_log_probs.sum(dim=-1)  # 1
 
-        losses[i] = response_log_probs_sum * reward
+        return response_log_probs_sum * reward
 
-    return losses.mean()
+    # Currently not batched for simplicity
+    losses = [completion_loss(completion, mask) for completion, mask in completions]
+    loss = torch.stack(losses).mean()
+
+    return loss
 
 
 def main() -> None:
@@ -84,7 +87,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     completions = rollout(tokenizer, model, count=ROLLOUT_COUNT)
-    loss = compute_loss(tokenizer, model, completions)
+    loss = rollout_loss(tokenizer, model, completions)
 
     print(f"Loss: {loss.item()}")
 
