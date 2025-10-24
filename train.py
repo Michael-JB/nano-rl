@@ -6,17 +6,14 @@ from transformers import (
     PreTrainedModel,
     get_scheduler,
 )
+from reward import digit_reward
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-PROMPT = "What number between 0 and 9 am I thinking of right now? Answer only with a single integer."
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+PROMPT = "What number between 0 and 9 am I thinking of right now? You MUST ONLY answer with a single integer."
+TARGET_DIGIT = 5  # The digit we want to favour
 ROLLOUT_COUNT = 10
-MAX_ROLLOUT_TOKENS = 20
-TRAIN_STEPS = 50
-
-
-# A simple reward to favour 7
-def seven_reward(response: str) -> int:
-    return 1 if "7" in response else 0
+MAX_ROLLOUT_TOKENS = 10
+TRAIN_STEPS = 10
 
 
 @torch.no_grad()
@@ -37,9 +34,9 @@ def rollout_group(
 
     def rollout() -> tuple[torch.Tensor, list[bool]]:
         # We squeeze as we're working with batch size 1
-        completion = model.generate(inputs, max_new_tokens=MAX_ROLLOUT_TOKENS).squeeze(
-            0
-        )
+        completion = model.generate(
+            inputs, max_new_tokens=MAX_ROLLOUT_TOKENS, temperature=1
+        ).squeeze(0)
         prompt_length = len(inputs[0])
         mask = [False] * prompt_length + [True] * (len(completion) - prompt_length)
         assert len(mask) == len(completion)
@@ -58,8 +55,8 @@ def rollout_group_loss(
         # Compute reward (we skip special tokens to strip the EOS token)
         response = completion[mask]
         response_text = tokenizer.decode(response, skip_special_tokens=True)
-        reward = seven_reward(response_text)
-        print(f"Reward: {reward}; Response: {response_text}")
+        reward = digit_reward(response_text, TARGET_DIGIT)
+        print(f"Reward: {reward:.4f}; Response: {response_text}")
 
         # A tensor with (log) probability distributions over the next token for
         # each sequence position. We truncate the final one as it doesn't make
@@ -101,7 +98,7 @@ def train(
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
-        num_warmup_steps=20,
+        num_warmup_steps=5,
         num_training_steps=TRAIN_STEPS,
     )
     for step in range(TRAIN_STEPS):
@@ -115,7 +112,7 @@ def train(
         lr_scheduler.step()
         optimizer.zero_grad()
 
-        print(f"Step {step + 1}/{TRAIN_STEPS}, Loss: {loss.item():.8f}")
+        print(f"Step {step + 1}/{TRAIN_STEPS}, Loss: {loss.item():.6f}")
 
 
 def main() -> None:
