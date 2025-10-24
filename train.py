@@ -4,20 +4,27 @@ from transformers import (
     AutoTokenizer,
     PreTrainedTokenizer,
     PreTrainedModel,
+    get_scheduler,
 )
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 PROMPT = "What number between 0 and 9 am I thinking of right now? Answer only with a single integer."
 ROLLOUT_COUNT = 10
+MAX_ROLLOUT_TOKENS = 20
+TRAIN_STEPS = 50
 
 
-# A simple reward to favour 3
-def three_reward(response: str) -> int:
-    return 1 if "3" in response else 0
+# A simple reward to favour 7
+def seven_reward(response: str) -> int:
+    return 1 if "7" in response else 0
 
 
-def rollout(
-    tokenizer: PreTrainedTokenizer, model: PreTrainedModel, count: int
+@torch.no_grad()
+def rollout_group(
+    device: torch.device,
+    tokenizer: PreTrainedTokenizer,
+    model: PreTrainedModel,
+    count: int,
 ) -> list[tuple[torch.Tensor, list[bool]]]:
     messages = [{"role": "user", "content": PROMPT}]
     inputs = tokenizer.apply_chat_template(
@@ -26,20 +33,22 @@ def rollout(
         return_tensors="pt",
         add_generation_prompt=True,
         enable_thinking=False,
-    )
+    ).to(device)
 
-    def complete() -> tuple[torch.Tensor, list[bool]]:
+    def rollout() -> tuple[torch.Tensor, list[bool]]:
         # We squeeze as we're working with batch size 1
-        completion = model.generate(inputs, max_new_tokens=100).squeeze(0)
+        completion = model.generate(inputs, max_new_tokens=MAX_ROLLOUT_TOKENS).squeeze(
+            0
+        )
         prompt_length = len(inputs[0])
         mask = [False] * prompt_length + [True] * (len(completion) - prompt_length)
         assert len(mask) == len(completion)
         return completion, mask
 
-    return [complete() for _ in range(count)]
+    return [rollout() for _ in range(count)]
 
 
-def rollout_loss(
+def rollout_group_loss(
     tokenizer: PreTrainedTokenizer,
     model: PreTrainedModel,
     completions: list[tuple[torch.Tensor, list[bool]]],
@@ -49,7 +58,8 @@ def rollout_loss(
         # Compute reward (we skip special tokens to strip the EOS token)
         response = completion[mask]
         response_text = tokenizer.decode(response, skip_special_tokens=True)
-        reward = three_reward(response_text)
+        print(f"Response: {response_text}")
+        reward = seven_reward(response_text)
 
         # A tensor with (log) probability distributions over the next token for
         # each sequence position. We truncate the final one as it doesn't make
@@ -81,15 +91,40 @@ def rollout_loss(
     return loss
 
 
+def train(
+    device: torch.device,
+    tokenizer: PreTrainedTokenizer,
+    model: PreTrainedModel,
+) -> None:
+    model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5)
+    lr_scheduler = get_scheduler(
+        "linear",
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=TRAIN_STEPS,
+    )
+    for step in range(TRAIN_STEPS):
+        model.eval()
+        with torch.no_grad():
+            completions = rollout_group(device, tokenizer, model, count=ROLLOUT_COUNT)
+        model.train()
+        loss = rollout_group_loss(tokenizer, model, completions)
+        loss.backward()
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+
+        print(f"Step {step + 1}/{TRAIN_STEPS}, Loss: {loss.item():.4f}")
+
+
 def main() -> None:
     torch.manual_seed(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    completions = rollout(tokenizer, model, count=ROLLOUT_COUNT)
-    loss = rollout_loss(tokenizer, model, completions)
-
-    print(f"Loss: {loss.item()}")
+    train(device, tokenizer, model)
 
 
 if __name__ == "__main__":
