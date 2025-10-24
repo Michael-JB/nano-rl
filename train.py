@@ -58,8 +58,8 @@ def rollout_group_loss(
         # Compute reward (we skip special tokens to strip the EOS token)
         response = completion[mask]
         response_text = tokenizer.decode(response, skip_special_tokens=True)
-        print(f"Response: {response_text}")
         reward = seven_reward(response_text)
+        print(f"Reward: {reward}; Response: {response_text}")
 
         # A tensor with (log) probability distributions over the next token for
         # each sequence position. We truncate the final one as it doesn't make
@@ -82,7 +82,7 @@ def rollout_group_loss(
 
         response_log_probs_sum = response_log_probs.sum(dim=-1)  # 1
 
-        return response_log_probs_sum * reward
+        return -response_log_probs_sum * reward
 
     # Currently not batched for simplicity
     losses = [completion_loss(completion, mask) for completion, mask in completions]
@@ -97,11 +97,11 @@ def train(
     model: PreTrainedModel,
 ) -> None:
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
-        num_warmup_steps=0,
+        num_warmup_steps=20,
         num_training_steps=TRAIN_STEPS,
     )
     for step in range(TRAIN_STEPS):
@@ -115,7 +115,7 @@ def train(
         lr_scheduler.step()
         optimizer.zero_grad()
 
-        print(f"Step {step + 1}/{TRAIN_STEPS}, Loss: {loss.item():.4f}")
+        print(f"Step {step + 1}/{TRAIN_STEPS}, Loss: {loss.item():.8f}")
 
 
 def main() -> None:
