@@ -1,6 +1,7 @@
 import random
+from pytest import fixture
 
-from reward import digit_reward
+from reward import digit_reward, anagram_reward
 
 
 def test_digit_reward_non_digit() -> None:
@@ -48,3 +49,52 @@ def test_digit_reward_scales_with_proximity() -> None:
 
     # Then
     assert reward_close > reward_far
+
+
+#####
+
+
+@fixture()
+def any_anagram() -> tuple[str, str]:
+    word = "example"
+    anagram = "".join(random.sample(word, len(word)))
+    prompt = (
+        f"The following set of characters are an anagram of a word: "
+        f"`{anagram}`. What is the original word?"
+    )
+    return (prompt, word)
+
+
+def test_anagram_reward_incorrect_word(any_anagram: tuple[str, str]) -> None:
+    # Given
+    prompt, word = any_anagram
+    response = "wrongword"
+
+    # When
+    reward = anagram_reward(prompt, response, set([word]))
+
+    # Then
+    assert reward == 0
+
+
+def test_anagram_reward_not_anagram(any_anagram: tuple[str, str]) -> None:
+    # Given
+    prompt, word = any_anagram
+    response = "nonanagram"
+
+    # When
+    reward = anagram_reward(prompt, response, set([response]))
+
+    # Then
+    assert reward == 0
+
+
+def test_anagram_valid_anagram(any_anagram: tuple[str, str]) -> None:
+    # Given
+    prompt, word = any_anagram
+
+    # When
+    reward = anagram_reward(prompt, word, set([word]))
+
+    # Then
+    assert reward == 1

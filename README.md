@@ -9,7 +9,7 @@ Playing around with RL as a learning exercise.
 Training a model to guess the number "5":
 
 ```
-$ uv run python train.py
+$ uv run python train_reinforce.py
 Reward: 0.0000; Response: The number I am thinking of is **3**
 Reward: 0.0000; Response: I don't know the number you're thinking of
 Reward: 0.0000; Response: I cannot determine the number between 0 and
