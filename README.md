@@ -1,5 +1,7 @@
 # nanl-rl
 
+> Note: this repo is WIP; forgive the messy code, missing docs and lack of TDD.
+
 Playing around with RL as a learning exercise.
 
 ## Example
