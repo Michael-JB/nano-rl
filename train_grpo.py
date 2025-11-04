@@ -6,29 +6,36 @@ from transformers import (
     PreTrainedModel,
     get_scheduler,
 )
-from reward import anagram_reward
+from reward import AnagramReward
 import pyarrow.parquet as pq
 from typing import Iterator
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+# MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-1.7B"
 EPOCHS = 2
 BATCH_SIZE = 10
 GROUP_SIZE = 5
 MAX_ROLLOUT_TOKENS = 20
 
+DICTIONARY_PARQUET_PATH = "data/dictionary.parquet"
+
+# TODO:
+# - Environment abstraction (?) tie dataset with reward
+# - Come up with good dataset abstraction (?)
+# - Return log probs from batch inference: create "sequence log probs" function?
+
+
+def load_dictionary(self) -> set[str]:
+    table = pq.read_table(self.DICTIONARY_PARQUET_PATH)
+    word_list = table["word"].to_pylist()
+    return set(word_list)
+
 
 class AnagramDataset:
-    DICTIONARY_PARQUET_PATH = "data/dictionary.parquet"
     ANAGRAMS_PARQUET_PATH = "data/anagrams.parquet"
 
     def __init__(self) -> None:
-        self.dictionary = self.load_dictionary()
         self._anagrams_parquet = pq.ParquetFile(self.ANAGRAMS_PARQUET_PATH)
-
-    def load_dictionary(self) -> pq.ParquetFile:
-        table = pq.read_table(self.DICTIONARY_PARQUET_PATH)
-        word_list = table["word"].to_pylist()
-        return set(word_list)
 
     def iter_batches(self, batch_size: int) -> Iterator[list[str]]:
         for batch in self._anagrams_parquet.iter_batches(batch_size=batch_size):
@@ -41,9 +48,13 @@ def to_message(prompt: str, tokenizer: PreTrainedTokenizer) -> torch.Tensor:
     messages = [
         {
             "role": "system",
-            "content": "You are an anagram solver. You must ONLY return the original word and NOTHING ELSE.",
+            # For example, given the anagram 'irgte', you should return 'tiger'.
+            "content": "Your task is to solve anagrams. You must ONLY return the original word and NOTHING ELSE.",
         },
-        {"role": "user", "content": prompt},
+        {
+            "role": "user",
+            "content": prompt,
+        },
     ]
     tokens = tokenizer.apply_chat_template(
         messages,
@@ -55,7 +66,6 @@ def to_message(prompt: str, tokenizer: PreTrainedTokenizer) -> torch.Tensor:
     return tokens
 
 
-@torch.no_grad()
 def rollout_batch(
     device: torch.device,
     tokenizer: PreTrainedTokenizer,
@@ -66,9 +76,9 @@ def rollout_batch(
 
     def rollout(inputs: torch.Tensor) -> tuple[torch.Tensor, list[bool]]:
         # We squeeze as we're working with batch size 1
-        completion = model.generate(inputs, max_new_tokens=MAX_ROLLOUT_TOKENS).squeeze(
-            0
-        )
+        completion = model.generate(
+            inputs, max_new_tokens=MAX_ROLLOUT_TOKENS, temperature=1
+        ).squeeze(0)
         prompt_length = len(inputs[0])
         mask = [False] * prompt_length + [True] * (len(completion) - prompt_length)
         assert len(mask) == len(completion)
@@ -80,9 +90,7 @@ def rollout_batch(
 
 def rollout_group_loss(
     tokenizer: PreTrainedTokenizer,
-    model: PreTrainedModel,
-    completions: list[tuple[torch.Tensor, list[bool]]],
-    reward_dictionary: set[str],
+    reward_function: AnagramReward,
 ) -> torch.Tensor:
     def completion_loss(completion: torch.Tensor, mask: list[bool]) -> torch.Tensor:
         # Compute reward (we skip special tokens to strip the EOS token)
@@ -90,7 +98,7 @@ def rollout_group_loss(
         response = completion[mask]
         response_text = tokenizer.decode(response, skip_special_tokens=True)
         prompt_text = tokenizer.decode(prompt, skip_special_tokens=True)
-        reward = anagram_reward(prompt_text, response_text, reward_dictionary)
+        reward = reward_function(prompt_text, response_text)
         print(f"Reward: {reward:.4f}; Response: {response_text}")
 
         # A tensor with (log) probability distributions over the next token for
@@ -128,6 +136,7 @@ def train(
     tokenizer: PreTrainedTokenizer,
     model: PreTrainedModel,
     dataset: AnagramDataset,
+    reward: AnagramReward,
 ) -> None:
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
@@ -145,7 +154,7 @@ def train(
                 completions = rollout_batch(device, tokenizer, model, batch)
             model.train()
             for g_i, group in enumerate(completions):
-                loss = rollout_group_loss(tokenizer, model, group, dataset.dictionary)
+                loss = rollout_group_loss(tokenizer, model, group, reward)
                 loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
@@ -165,8 +174,9 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     dataset = AnagramDataset()
+    reward = AnagramReward(load_dictionary())
 
-    train(device, tokenizer, model, dataset)
+    train(device, tokenizer, model, dataset, reward)
 
 
 if __name__ == "__main__":
