@@ -1,15 +1,15 @@
 import random
 
-from reward import digit_reward
+from environment import Environment
 
 
 def test_digit_reward_non_digit() -> None:
     # Given
     response = "Hello, World!"
-    target_digit = 5
+    environment = Environment()
 
     # When
-    reward = digit_reward(response, target_digit)
+    reward = environment.reward(response)
 
     # Then
     assert reward == 0.0
@@ -17,10 +17,10 @@ def test_digit_reward_non_digit() -> None:
 
 def test_digit_reward_correct_digit() -> None:
     # Given
-    target_digit = 5
+    environment = Environment()
 
     # When
-    reward = digit_reward(str(target_digit), target_digit)
+    reward = environment.reward(str(environment.target_digit))
 
     # Then
     assert reward == 1.0
@@ -28,11 +28,13 @@ def test_digit_reward_correct_digit() -> None:
 
 def test_digit_reward_incorrect_digit() -> None:
     # Given
-    target_digit = 5
-    incorrect_digit = random.choice([d for d in range(10) if d != target_digit])
+    environment = Environment()
+    incorrect_digit = random.choice(
+        [d for d in range(10) if d != environment.target_digit]
+    )
 
     # When
-    reward = digit_reward(str(incorrect_digit), target_digit)
+    reward = environment.reward(str(incorrect_digit))
 
     # Then
     assert reward > 0.0 and reward < 1.0
@@ -41,10 +43,11 @@ def test_digit_reward_incorrect_digit() -> None:
 def test_digit_reward_scales_with_proximity() -> None:
     # Given
     target_digit, close, far = sorted(random.sample(range(10), 3))
+    environment = Environment(target_digit)
 
     # When
-    reward_close = digit_reward(str(close), target_digit)
-    reward_far = digit_reward(str(far), target_digit)
+    reward_close = environment.reward(str(close))
+    reward_far = environment.reward(str(far))
 
     # Then
     assert reward_close > reward_far
