@@ -5,4 +5,5 @@
 This repository contains minimal example implementations of RL algorithms. Each
 algorithm has its own directory:
 - [REINFORCE](reinforce)
+- [GRPO](grpo)
 - ... more coming soon.

@@ -1,4 +1,4 @@
-# reinforce
+# REINFORCE
 
 This directory contains a simple, minimal implementation of the REINFORCE
 algorithm. This example trains a model to always guess the number '5' when given
