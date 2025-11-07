@@ -58,29 +58,26 @@ def rollout(
     return Experience(completion, prompt_mask)
 
 
-def log_probs(model: PreTrainedModel, experience: Experience) -> torch.Tensor:
-    # A tensor with (log) probability distributions over the next token for each
-    # sequence position. We truncate the final one as it doesn't make sense to
-    # have a distribution past the end of the sequence. Note also that there is
-    # no distribution for the first token, as there is no prior context. It's
-    # for this reason that we later remove the first element of the mask. TODO:
-    # can we start with the masked completion instead of masking afterwards?
-    logits = (
-        model(experience.completion.unsqueeze(0)).logits[:, :-1, :].squeeze(0)
-    )  # T, C
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)  # T, C
-
-    # pluck out the actual generated token from the vocab dimension
-    conditional_tokens = experience.completion[1:]  # T
-    conditional_log_probs = log_probs[
-        torch.arange(conditional_tokens.size(0)), conditional_tokens
-    ]  # T
-
+def log_probs_sum(model: PreTrainedModel, experience: Experience) -> torch.Tensor:
+    # these are the logits at each sequence position for the whole completion
+    # (i.e., including the prompt)
+    completion_logits: torch.Tensor = model(
+        experience.completion.unsqueeze(0)
+    ).logits.squeeze(0)
+    # the completion logits include a prediction past the end of sequence, so we
+    # strip this
+    sequence_logits = completion_logits[:-1, :]
+    # the completion does not include logits for the first token as there is no
+    # prior context, so we strip the first element in the mask
+    causal_prompt_mask = experience.prompt_mask[1:]
     # we mask to only consider the response tokens for the objective
-    response_tokens_mask = torch.tensor(experience.prompt_mask[1:])  # T
-    response_log_probs = conditional_log_probs[response_tokens_mask]  # T
-
-    return response_log_probs
+    logits = sequence_logits[causal_prompt_mask, :]
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)  # T, C
+    # pluck out the actual generated token from the vocab dimension
+    response_log_probs = log_probs[
+        torch.arange(experience.response.size(0)), experience.response
+    ]  # T
+    return response_log_probs.sum(dim=-1)  # 1
 
 
 def objective(
@@ -93,10 +90,7 @@ def objective(
     response = tokenizer.decode(experience.response, skip_special_tokens=True)
     reward = environment.reward(response)
     print(f"Reward: {reward:.4f}; Response: {response}")
-
-    log_probs_sum = log_probs(model, experience).sum(dim=-1)  # 1
-
-    return log_probs_sum * reward
+    return log_probs_sum(model, experience) * reward
 
 
 def train(
