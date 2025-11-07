@@ -18,7 +18,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 ROLLOUT_COUNT = 25  # Number of rollouts per step
 GROUP_SIZE = 5  # The number of experiences to contribute to a single gradient step
 MAX_ROLLOUT_TOKENS = 10  # The maximum number of response tokens that the model can generate during rollouts
-TRAIN_STEPS = 4  # The number of training steps; we only do rollouts once per train step
+TRAIN_STEPS = 5  # The number of training steps; we only do rollouts once per train step
 GRAD_UPDATES_PER_STEP = 5  # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
 REPLAY_BUFFER_CAPACITY = 50  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
 EPSILON = 0.2  # The epsilon term in the GRPO objective
@@ -148,7 +148,7 @@ def objective(
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
     group: list[Experience],
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     rewards = torch.tensor(
         [reward(tokenizer, environment, experience) for experience in group],
         dtype=torch.float,
@@ -156,13 +156,20 @@ def objective(
     mean_reward = rewards.mean().item()
     std_reward = rewards.std().item()
 
+    if std_reward == 0:
+        # we get no signal from this group; throw it away.
+        return None
+
     def experience_objective(experience: Experience, reward: float) -> torch.Tensor:
-        advantage = (reward - mean_reward) / std_reward if std_reward != 0 else 0
+        advantage = (reward - mean_reward) / std_reward
 
         logits = response_logits(model, experience)
         log_probs_sum = sum_log_probs(experience.response, logits)
 
-        importance = log_probs_sum / experience.log_probs_sum
+        # we exponentiate as the importance is the ratio between the policy
+        # probabilities, not the log probs. We operate in log space for
+        # numerical stability.
+        importance = torch.exp(log_probs_sum - experience.log_probs_sum)
         clipped_importance = torch.clip(importance, 1 - EPSILON, 1 + EPSILON)
 
         return torch.min(importance * advantage, clipped_importance * advantage)
@@ -181,7 +188,7 @@ def train(
     environment: Environment,
 ) -> None:
     model.to(device)  # type: ignore
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6, maximize=True)
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
@@ -209,6 +216,13 @@ def train(
         for grad_step in range(GRAD_UPDATES_PER_STEP):
             group = replay_buffer.sample(GROUP_SIZE)
             group_objective = objective(model, tokenizer, environment, group)
+            if not group_objective:
+                print(
+                    f"-- No signal in grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
+                    f"in train step {step + 1}/{TRAIN_STEPS}; skipping grad update --"
+                )
+                continue
+
             group_objective.backward()
             optimizer.step()
             lr_scheduler.step()
