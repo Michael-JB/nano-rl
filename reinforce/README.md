@@ -19,7 +19,7 @@ Reward: 0.0000; Response: The number I am thinking of is **0**
 Reward: 0.6667; Response: 2
 Reward: 0.0000; Response: The number between 0 and 9 you are
 Reward: 0.0000; Response: 1. You are thinking of the number **1
-Step 1/10, Loss: 0.2701
+-- Train step 1/10 completed. Objective: -0.270146 --
 Reward: 0.6667; Response: 2
 Reward: 0.0000; Response: The number is **4**.
 Reward: 0.0000; Response: I cannot determine the exact number you're thinking of
@@ -30,7 +30,7 @@ Reward: 0.0000; Response: I don't have access to a digital device or
 Reward: 0.0000; Response: I don't have access to real-time information.
 Reward: 0.0000; Response: You do not need to answer with a single number
 Reward: 0.0000; Response: You are thinking of the number **1**.
-Step 2/10, Loss: 0.2701
+-- Train step 2/10 completed. Objective: -0.270146 --
 Reward: 0.6667; Response: 2
 Reward: 0.0000; Response: The number I am thinking of is **2**
 Reward: 0.6667; Response: 2
@@ -41,7 +41,7 @@ Reward: 0.5556; Response: 1
 Reward: 0.0000; Response: The number I am thinking of is 5.
 Reward: 0.0000; Response: I don't have access to your thoughts or a
 Reward: 0.4444; Response: 0
-Step 3/10, Loss: 0.7907
+-- Train step 3/10 completed. Objective: -0.790735 --
 Reward: 0.5556; Response: 1
 Reward: 0.8889; Response: 4
 Reward: 0.0000; Response: The number you're thinking of is 5.
@@ -52,7 +52,7 @@ Reward: 0.4444; Response: 0
 Reward: 0.0000; Response: The number I am thinking of is **3**
 Reward: 1.0000; Response: 5
 Reward: 0.6667; Response: 2
-Step 4/10, Loss: 1.0462
+-- Train step 4/10 completed. Objective: -1.046238 --
 Reward: 1.0000; Response: 5
 Reward: 0.5556; Response: 1
 Reward: 0.4444; Response: 0
@@ -63,7 +63,7 @@ Reward: 0.8889; Response: 4
 Reward: 0.5556; Response: 1
 Reward: 0.6667; Response: 2
 Reward: 0.6667; Response: 2
-Step 5/10, Loss: 1.2833
+-- Train step 5/10 completed. Objective: -1.283335 --
 Reward: 0.8889; Response: 4
 Reward: 0.8889; Response: 4
 Reward: 0.8889; Response: 4
@@ -74,7 +74,7 @@ Reward: 1.0000; Response: 5
 Reward: 0.8889; Response: 4
 Reward: 0.7778; Response: 3
 Reward: 0.5556; Response: 1
-Step 6/10, Loss: 1.3461
+-- Train step 6/10 completed. Objective: -1.346148 --
 Reward: 1.0000; Response: 5
 Reward: 0.8889; Response: 4
 Reward: 1.0000; Response: 5
@@ -85,7 +85,7 @@ Reward: 1.0000; Response: 5
 Reward: 0.6667; Response: 2
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
-Step 7/10, Loss: 0.9725
+-- Train step 7/10 completed. Objective: -0.972523 --
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
@@ -96,7 +96,7 @@ Reward: 1.0000; Response: 5
 Reward: 0.8889; Response: 4
 Reward: 1.0000; Response: 5
 Reward: 0.8889; Response: 4
-Step 8/10, Loss: 0.6268
+-- Train step 8/10 completed. Objective: -0.626751 --
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
@@ -107,7 +107,7 @@ Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 0.8889; Response: 4
-Step 9/10, Loss: 0.3334
+-- Train step 9/10 completed. Objective: -0.333392 --
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
@@ -118,5 +118,5 @@ Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
 Reward: 1.0000; Response: 5
-Step 10/10, Loss: 0.3183
+-- Train step 10/10 completed. Objective: -0.318341 --
 ```

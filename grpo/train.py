@@ -1,5 +1,8 @@
-import torch
 import random
+from dataclasses import dataclass
+from collections import deque
+
+import torch
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -7,9 +10,9 @@ from transformers import (
     PreTrainedModel,
     get_scheduler,
 )
-from dataclasses import dataclass
+from transformers.generation.utils import GenerateDecoderOnlyOutput
+
 from environment import Environment
-from collections import deque
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 ROLLOUT_COUNT = 25  # Number of rollouts per step
@@ -18,7 +21,7 @@ MAX_ROLLOUT_TOKENS = 10  # The maximum number of response tokens that the model 
 TRAIN_STEPS = 4  # The number of training steps; we only do rollouts once per train step
 GRAD_UPDATES_PER_STEP = 5  # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
 REPLAY_BUFFER_CAPACITY = 50  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
-EPSILON = 0.2  # The epsilon term in the GRPO loss equation
+EPSILON = 0.2  # The epsilon term in the GRPO objective
 
 
 @dataclass(frozen=True)
@@ -48,12 +51,12 @@ class ReplayBuffer:
 
     def __init__(self, capacity: int) -> None:
         self.capacity = capacity
-        self.buffer = deque(maxlen=capacity)
+        self.buffer: deque[Experience] = deque(maxlen=capacity)
 
     def push(self, experiences: list[Experience]) -> None:
         self.buffer.extend(experiences)
 
-    def sample(self, count: int):
+    def sample(self, count: int) -> list[Experience]:
         if len(self.buffer) < count:
             raise ValueError("Failed to sample; insufficient buffer entries")
         return random.sample(list(self.buffer), count)
@@ -75,20 +78,19 @@ def rollout(
         return_tensors="pt",
         add_generation_prompt=True,
         enable_thinking=False,
-    ).to(device)
-
-    model_output = model.generate(
+    ).to(device)  # type: ignore
+    model_output: GenerateDecoderOnlyOutput = model.generate(
         inputs,
         max_new_tokens=MAX_ROLLOUT_TOKENS,
         temperature=1,
-        # both required to both the completion and the response logits
+        # both required to return the completion and the response logits
         output_logits=True,
         return_dict_in_generate=True,
-    )
+    )  # type: ignore
+
     # squeeze out the batch dimension
     completion = model_output.sequences.squeeze(0)
 
-    # create the prompt mask
     prompt_length = len(inputs[0])
     prompt_mask = [False] * prompt_length + [True] * (len(completion) - prompt_length)
     assert len(prompt_mask) == len(completion)
@@ -128,18 +130,20 @@ def response_logits(
 ) -> torch.Tensor:
     # these are the logits at each sequence position for the whole completion
     # (i.e., including the prompt)
-    completion_logits = model(experience.completion.unsqueeze(0)).logits.squeeze(0)
+    completion_logits: torch.Tensor = model(
+        experience.completion.unsqueeze(0)
+    ).logits.squeeze(0)
     # the completion logits include a prediction past the end of sequence, so we
     # strip this
     sequence_logits = completion_logits[:-1, :]
     # the completion does not include logits for the first token as there is no
     # prior context, so we strip the first element in the mask
     causal_prompt_mask = experience.prompt_mask[1:]
-    # we only want to consider the response tokens for the loss, so apply the prompt mask
+    # we mask to only consider the response tokens for the objective
     return sequence_logits[causal_prompt_mask, :]
 
 
-def loss(
+def objective(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
@@ -152,26 +156,22 @@ def loss(
     mean_reward = rewards.mean().item()
     std_reward = rewards.std().item()
 
-    def experience_loss(experience: Experience, reward: float) -> torch.Tensor:
+    def experience_objective(experience: Experience, reward: float) -> torch.Tensor:
         advantage = (reward - mean_reward) / std_reward if std_reward != 0 else 0
 
-        log_probs_sum = sum_log_probs(
-            experience.response, response_logits(model, experience)
-        )
+        logits = response_logits(model, experience)
+        log_probs_sum = sum_log_probs(experience.response, logits)
 
         importance = log_probs_sum / experience.log_probs_sum
         clipped_importance = torch.clip(importance, 1 - EPSILON, 1 + EPSILON)
 
-        weighted_advantage = torch.min(
-            importance * advantage, clipped_importance * advantage
-        )
-        return weighted_advantage
+        return torch.min(importance * advantage, clipped_importance * advantage)
 
-    losses = [
-        experience_loss(experience, reward)
+    objectives = [
+        experience_objective(experience, reward)
         for experience, reward in zip(group, rewards.tolist())
     ]
-    return torch.stack(losses).mean()
+    return torch.stack(objectives).mean()
 
 
 def train(
@@ -180,7 +180,7 @@ def train(
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
 ) -> None:
-    model.to(device)
+    model.to(device)  # type: ignore
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
     lr_scheduler = get_scheduler(
         "linear",
@@ -191,6 +191,9 @@ def train(
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
     for step in range(TRAIN_STEPS):
+        # Populate the replay buffer with rollouts. In "real" implementations,
+        # this would happen in parallel with training, though we keep things
+        # sequential here for simplicity.
         model.eval()
         with torch.no_grad():
             experiences = [
@@ -199,19 +202,21 @@ def train(
             ]
             replay_buffer.push(experiences)
 
+        # Perform gradient steps from samples in the replay buffer. For each
+        # gradient step in this loop, the training will stray further
+        # off-policy.
         model.train()
         for grad_step in range(GRAD_UPDATES_PER_STEP):
             group = replay_buffer.sample(GROUP_SIZE)
-            group_loss = loss(model, tokenizer, environment, group)
-            group_loss.backward()
+            group_objective = objective(model, tokenizer, environment, group)
+            group_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-
             print(
                 f"-- Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
                 f"in train step {step + 1}/{TRAIN_STEPS} completed. "
-                f"Loss: {group_loss.item():.6f} --"
+                f"Objective: {group_objective.item():.6f} --"
             )
 
 
