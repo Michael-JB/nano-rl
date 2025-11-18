@@ -34,6 +34,8 @@ class Experience:
     # The sum of the log probs of the response at generation time (i.e.,
     # according to the policy that the response was generated with)
     log_probs_sum: float
+    # A float reward for the response.
+    reward: float
 
     @property
     def response(self) -> torch.Tensor:
@@ -101,7 +103,12 @@ def rollout(
     # pluck out the item as we don't need grads
     log_probs_sum = sum_log_probs(response, response_logits).item()
 
-    return Experience(completion, prompt_mask, log_probs_sum)
+    return Experience(
+        completion,
+        prompt_mask,
+        log_probs_sum,
+        reward(tokenizer, environment, response),
+    )
 
 
 def sum_log_probs(
@@ -116,11 +123,11 @@ def sum_log_probs(
 def reward(
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
-    experience: Experience,
+    response: torch.Tensor,
 ) -> float:
-    response = tokenizer.decode(experience.response, skip_special_tokens=True)
-    reward = environment.reward(response)
-    print(f"Reward: {reward:.3f}; Response: {response}")
+    response_text = tokenizer.decode(response, skip_special_tokens=True)
+    reward = environment.reward(response_text)
+    print(f"Reward: {reward:.3f}; Response: {response_text}")
     return reward
 
 
@@ -145,23 +152,17 @@ def response_logits(
 
 def objective(
     model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizer,
-    environment: Environment,
     group: list[Experience],
-) -> torch.Tensor | None:
-    rewards = torch.tensor(
-        [reward(tokenizer, environment, experience) for experience in group],
-        dtype=torch.float,
-    )
+) -> torch.Tensor:
+    rewards = torch.Tensor([experience.reward for experience in group])
     mean_reward = rewards.mean().item()
     std_reward = rewards.std().item()
 
-    if std_reward == 0:
-        # we get no signal from this group; throw it away.
-        return None
-
     def experience_objective(experience: Experience, reward: float) -> torch.Tensor:
-        advantage = (reward - mean_reward) / std_reward
+        # We add a small epsilon to the standard deviation to prevent
+        # zero-divides when all samples in the group have the same reward.
+        # In these cases, there is no useful training signal.
+        advantage = (reward - mean_reward) / (std_reward + 1e-6)
 
         logits = response_logits(model, experience)
         log_probs_sum = sum_log_probs(experience.response, logits)
@@ -201,6 +202,7 @@ def train(
         # Populate the replay buffer with rollouts. In "real" implementations,
         # this would happen in parallel with training, though we keep things
         # sequential here for simplicity.
+        print("-- Generating rollouts")
         model.eval()
         with torch.no_grad():
             experiences = [
@@ -212,25 +214,19 @@ def train(
         # Perform gradient steps from samples in the replay buffer. For each
         # gradient step in this loop, the training will stray further
         # off-policy.
+        print("-- Training")
         model.train()
         for grad_step in range(GRAD_UPDATES_PER_STEP):
             group = replay_buffer.sample(GROUP_SIZE)
-            group_objective = objective(model, tokenizer, environment, group)
-            if not group_objective:
-                print(
-                    f"-- No signal in grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
-                    f"in train step {step + 1}/{TRAIN_STEPS}; skipping grad update --"
-                )
-                continue
-
+            group_objective = objective(model, group)
             group_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             print(
-                f"-- Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
+                f"Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
                 f"in train step {step + 1}/{TRAIN_STEPS} completed. "
-                f"Objective: {group_objective.item():.6f} --"
+                f"Objective: {group_objective.item():.6f}"
             )
 
 
