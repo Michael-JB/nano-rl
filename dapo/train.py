@@ -15,12 +15,12 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 from environment import Environment
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-ROLLOUT_COUNT = 20  # Number of valid samples to add to the replay buffer per step (implementation detail)
+ROLLOUT_COUNT = 25  # Number of valid samples to add to the replay buffer per step (implementation detail)
 GROUP_SIZE = 5  # The number of experiences to contribute to a single gradient step
 MAX_ROLLOUT_TOKENS = 4  # The maximum number of response tokens that the model can generate during rollouts
 TRAIN_STEPS = 6  # The number of training steps; we only do rollouts once per train step
 GRAD_UPDATES_PER_STEP = 5  # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
-REPLAY_BUFFER_CAPACITY = 50  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
+REPLAY_BUFFER_CAPACITY = 60  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
 EPSILON_LOW = 0.2  # The epsilon_low term in the DAPO objective
 EPSILON_HIGH = 0.28  # The epsilon_high term in the DAPO objective
 
@@ -151,16 +151,12 @@ def response_logits(
 def objective(
     model: PreTrainedModel,
     group: list[Experience],
-) -> torch.Tensor | None:
+) -> torch.Tensor:
     rewards = torch.Tensor([experience.reward for experience in group])
     mean_reward = rewards.mean().item()
-    std_reward = rewards.std().item()
-
-    if std_reward == 0:
-        # we get no signal from this group; throw it away. Note: due to dynamic
-        # sampling, this should be very unlikely in DAPO, unless you've got a
-        # discrete reward (as we do in this example).
-        return None
+    std_reward = (
+        rewards.std().item()
+    )  # DAPO dynamic sampling guarantees this will never be 0
 
     def experience_objective(experience: Experience) -> torch.Tensor:
         advantage = (experience.reward - mean_reward) / std_reward
@@ -198,43 +194,42 @@ def train(
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
     for step in range(TRAIN_STEPS):
-        # Populate the replay buffer with rollouts using DAPO's dynamic
-        # sampling: over-sample and discard rewards that might lead to a zero
-        # group advantage.`ROLLOUT_COUNT` is just here as we're doing things
-        # sequentially. In "real" implementations, this would happen in parallel
-        # with training, though we keep things sequential here for simplicity.
+        # Populate the replay buffer with rollouts. In "real" implementations,
+        # this would happen in parallel with training, though we keep things
+        # sequential here for simplicity.
+        print("-- Generating rollouts")
         model.eval()
         with torch.no_grad():
-            new_experiences: list[Experience] = []
-            while len(new_experiences) < ROLLOUT_COUNT:
-                experience = rollout(device, model, tokenizer, environment)
-                if experience.reward == 0 or experience.reward == 1:
-                    continue
-                new_experiences.append(experience)
-            replay_buffer.push(new_experiences)
+            experiences = [
+                rollout(device, model, tokenizer, environment)
+                for _ in range(ROLLOUT_COUNT)
+            ]
+            replay_buffer.push(experiences)
 
         # Perform gradient steps from samples in the replay buffer. For each
         # gradient step in this loop, the training will stray further
         # off-policy.
+        print("-- Training")
         model.train()
         for grad_step in range(GRAD_UPDATES_PER_STEP):
+            # Dynamic sampling: we continuously re-sample from the replay
+            # buffer until we have reward diversity in our group. Note: as we
+            # don't have a binary reward, we check for all-equal rewards rather
+            # than for all-1 rewards as the DAPO objective describes.
             group = replay_buffer.sample(GROUP_SIZE)
-            group_objective = objective(model, group)
-            if not group_objective:
-                print(
-                    f"-- No signal in grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
-                    f"in train step {step + 1}/{TRAIN_STEPS}; skipping grad update --"
-                )
-                continue
+            while len(set([experience.reward for experience in group])) == 1:
+                print("Sampled group would give no learning signal; resampling...")
+                group = replay_buffer.sample(GROUP_SIZE)
 
+            group_objective = objective(model, group)
             group_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             print(
-                f"-- Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
+                f"Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
                 f"in train step {step + 1}/{TRAIN_STEPS} completed. "
-                f"Objective: {group_objective.item():.6f} --"
+                f"Objective: {group_objective.item():.6f}"
             )
 
 
