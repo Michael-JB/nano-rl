@@ -12,10 +12,10 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from environment import Environment
+from ..environment import Environment, DigitEnvironment
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrainConfig:
     # The number of experiences to sample
     group_size: int
@@ -244,6 +244,9 @@ def train(
         print("-- Training")
         model.train()
         while len(dynamic_sampling_buffer) > 0:
+            # while we could backpropagate groups individually, the DAPO paper
+            # batches multiple groups into a single gradient step so we demonstrate
+            # that here.
             groups = [
                 dynamic_sampling_buffer.pop() for _ in range(config.train_batch_size)
             ]
@@ -272,7 +275,7 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(model_name)
     model.to(device)  # type: ignore
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    environment = Environment()
+    environment = DigitEnvironment()
     train_config = TrainConfig(
         group_size=6,
         max_rollout_tokens=4,

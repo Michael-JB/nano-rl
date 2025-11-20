@@ -13,7 +13,7 @@ training.
 ## Example
 
 ```
-$ uv run python train.py
+$ uv run python -m nano_rl.grpo.train
 -- Generating rollouts
 Reward: 0.000; Response: The number I am thinking of is **3**
 Reward: 0.000; Response: I don't know the number you're thinking of

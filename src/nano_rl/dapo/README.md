@@ -23,13 +23,13 @@ prompt ten times and every response had a reward of 1, we discard that prompt
 critical size, we would then iterate through groups in the buffer (in batches)
 and train on them by maximising the DAPO objective.
 
-This implementation has only a single prompt, so we just continually resample
+As this implementation only uses a single prompt, we just continually resample
 responses rather than picking new prompts.
 
 ## Example
 
 ```
-$ uv run python train.py
+$ uv run python -m nano_rl.dapo.train
 -- Generating rollouts
 Reward: 0.000; Response: The number I am
 Reward: 0.000; Response: You are thinking of

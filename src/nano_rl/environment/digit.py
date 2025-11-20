@@ -1,4 +1,7 @@
-class Environment:
+from .environment import Environment
+
+
+class DigitEnvironment(Environment):
     PROMPT = "What number between 0 and 9 am I thinking of right now? You MUST ONLY answer with a single integer."
 
     def __init__(self, target_digit: int = 5) -> None:

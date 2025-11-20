@@ -12,10 +12,10 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from environment import Environment
+from ..environment import Environment, DigitEnvironment
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrainConfig:
     # The number of rollouts per step
     rollout_count: int
@@ -231,6 +231,8 @@ def train(
         print("-- Training")
         model.train()
         for grad_step in range(config.grad_updates_per_step):
+            # In a real implementation, we would batch multiple groups into a
+            # single gradient step for efficiency by summing their objectives.
             group = replay_buffer.sample(config.group_size)
             group_objective = objective(model, group, config.epsilon)
             group_objective.backward()
@@ -253,7 +255,7 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(model_name)
     model.to(device)  # type: ignore
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    environment = Environment()
+    environment = DigitEnvironment()
     train_config = TrainConfig(
         rollout_count=25,
         group_size=5,

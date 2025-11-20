@@ -8,7 +8,7 @@ You MUST ONLY answer with a single integer.".
 ## Example
 
 ```
-$ uv run python train.py
+$ uv run python -m nano_rl.reinforce.train
 Reward: 0.0000; Response: The number I am thinking of is **3**
 Reward: 0.0000; Response: I don't know the number you're thinking of
 Reward: 0.0000; Response: I cannot determine the number between 0 and

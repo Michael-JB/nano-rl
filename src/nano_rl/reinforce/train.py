@@ -9,7 +9,7 @@ from transformers import (
     get_scheduler,
 )
 
-from environment import Environment
+from ..environment import Environment, DigitEnvironment
 
 
 @dataclass(frozen=True)
@@ -148,7 +148,7 @@ def main() -> None:
     model_name = "Qwen/Qwen3-0.6B"
     model = AutoModelForCausalLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    environment = Environment()
+    environment = DigitEnvironment()
     train_config = TrainConfig(
         rollout_count=10,
         max_rollout_tokens=10,

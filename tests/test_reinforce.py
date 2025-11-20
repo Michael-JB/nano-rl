@@ -6,15 +6,15 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from environment import Environment
-from train import TrainConfig, rollout, train
+from nano_rl.environment import DigitEnvironment
+from nano_rl.reinforce.train import TrainConfig, rollout, train
 
 
 def model_accuracy(
     device: torch.device,
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
-    environment: Environment,
+    environment: DigitEnvironment,
     rollout_count: int = 10,
 ) -> float:
     rollouts = [
@@ -24,28 +24,21 @@ def model_accuracy(
         tokenizer.decode(rollout.response, skip_special_tokens=True)
         for rollout in rollouts
     ]
-    correct_rollouts = sum(
-        1 for r in responses if r.strip() == str(environment.target_digit)
-    )
+    correct_rollouts = sum(1 for r in responses if r == str(environment.target_digit))
     return correct_rollouts / rollout_count
 
 
-def test_train() -> None:
+def test_train(device: torch.device) -> None:
     # Given
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "Qwen/Qwen3-0.6B"
     model = AutoModelForCausalLM.from_pretrained(model_name)
     model.to(device)  # type: ignore
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    environment = Environment()
+    environment = DigitEnvironment()
     train_config = TrainConfig(
-        group_size=6,
-        max_rollout_tokens=4,
-        train_steps=4,
-        train_batch_size=2,
-        dynamic_sampling_buffer_capacity=6,
-        epsilon_low=0.2,
-        epsilon_high=0.28,
+        rollout_count=30,
+        max_rollout_tokens=2,
+        train_steps=10,
     )
     assert (
         model_accuracy(

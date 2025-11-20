@@ -1,12 +1,12 @@
 import random
 
-from environment import Environment
+from nano_rl.environment import DigitEnvironment
 
 
 def test_digit_reward_non_digit() -> None:
     # Given
     response = "Hello, World!"
-    environment = Environment()
+    environment = DigitEnvironment()
 
     # When
     reward = environment.reward(response)
@@ -17,7 +17,7 @@ def test_digit_reward_non_digit() -> None:
 
 def test_digit_reward_correct_digit() -> None:
     # Given
-    environment = Environment()
+    environment = DigitEnvironment()
 
     # When
     reward = environment.reward(str(environment.target_digit))
@@ -28,7 +28,7 @@ def test_digit_reward_correct_digit() -> None:
 
 def test_digit_reward_incorrect_digit() -> None:
     # Given
-    environment = Environment()
+    environment = DigitEnvironment()
     incorrect_digit = random.choice(
         [d for d in range(10) if d != environment.target_digit]
     )
@@ -43,7 +43,7 @@ def test_digit_reward_incorrect_digit() -> None:
 def test_digit_reward_scales_with_proximity() -> None:
     # Given
     target_digit, close, far = sorted(random.sample(range(10), 3))
-    environment = Environment(target_digit)
+    environment = DigitEnvironment(target_digit)
 
     # When
     reward_close = environment.reward(str(close))
