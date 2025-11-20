@@ -11,10 +11,15 @@ from transformers import (
 
 from environment import Environment
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
-ROLLOUT_COUNT = 10
-MAX_ROLLOUT_TOKENS = 10
-TRAIN_STEPS = 10
+
+@dataclass(frozen=True)
+class TrainConfig:
+    # The number of rollouts per train step
+    rollout_count: int
+    # The maximum number of response tokens that the model can generate during rollouts
+    max_rollout_tokens: int
+    # The number of training steps
+    train_steps: int
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,7 @@ def rollout(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    max_response_tokens: int,
 ) -> Experience:
     messages = environment.prompt()
     inputs = tokenizer.apply_chat_template(
@@ -47,7 +53,7 @@ def rollout(
 
     # We squeeze as we're working with batch size 1
     completion = (
-        model.generate(inputs, max_new_tokens=MAX_ROLLOUT_TOKENS, temperature=1)  # type: ignore
+        model.generate(inputs, max_new_tokens=max_response_tokens, temperature=1)  # type: ignore
         .squeeze(0)
         .to(device)
     )
@@ -98,6 +104,7 @@ def train(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    config: TrainConfig,
 ) -> None:
     model.to(device)  # type: ignore
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6, maximize=True)
@@ -105,15 +112,17 @@ def train(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=5,
-        num_training_steps=TRAIN_STEPS,
+        num_training_steps=config.train_steps,
     )
 
-    for step in range(TRAIN_STEPS):
+    for step in range(config.train_steps):
         model.eval()
         with torch.no_grad():
             experiences = [
-                rollout(device, model, tokenizer, environment)
-                for _ in range(ROLLOUT_COUNT)
+                rollout(
+                    device, model, tokenizer, environment, config.max_rollout_tokens
+                )
+                for _ in range(config.rollout_count)
             ]
 
         model.train()
@@ -127,19 +136,26 @@ def train(
         lr_scheduler.step()
         optimizer.zero_grad()
         print(
-            f"-- Train step {step + 1}/{TRAIN_STEPS} completed. "
+            f"-- Train step {step + 1}/{config.train_steps} completed. "
             f"Objective: {mean_objective.item():.6f} --"
         )
 
 
 def main() -> None:
     torch.manual_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    environment = Environment()
 
-    train(device, model, tokenizer, environment)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_name = "Qwen/Qwen3-0.6B"
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    environment = Environment()
+    train_config = TrainConfig(
+        rollout_count=10,
+        max_rollout_tokens=10,
+        train_steps=10,
+    )
+
+    train(device, model, tokenizer, environment, train_config)
 
 
 if __name__ == "__main__":
