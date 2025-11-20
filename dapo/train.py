@@ -14,18 +14,29 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from environment import Environment
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
-GROUP_SIZE = 6  # The number of experiences to sample
-MAX_ROLLOUT_TOKENS = 4  # The maximum number of response tokens that the model can generate during rollouts
-TRAIN_STEPS = 4  # The number of training steps; we only do rollouts once per train step
-TRAIN_BATCH_SIZE = 2  # The number of groups to process in a single gradient step
-DYNAMIC_SAMPLING_BUFFER_CAPACITY = (
-    6  # The number of groups the dynamic sampling buffer can hold
-)
-EPSILON_LOW = 0.2  # The epsilon_low term in the DAPO objective
-EPSILON_HIGH = 0.28  # The epsilon_high term in the DAPO objective
 
-assert DYNAMIC_SAMPLING_BUFFER_CAPACITY % TRAIN_BATCH_SIZE == 0
+@dataclass
+class TrainConfig:
+    # The number of experiences to sample
+    group_size: int
+    # The maximum number of response tokens that the model can generate during rollouts
+    max_rollout_tokens: int
+    # The number of training steps; we only do rollouts once per train step
+    train_steps: int
+    # The number of groups to process in a single gradient step
+    train_batch_size: int
+    # The number of groups the dynamic sampling buffer can hold
+    dynamic_sampling_buffer_capacity: int
+    # The epsilon_low term in the DAPO objective
+    epsilon_low: float
+    # The epsilon_high term in the DAPO objective
+    epsilon_high: float
+
+    def __post_init__(self) -> None:
+        if self.dynamic_sampling_buffer_capacity % self.train_batch_size != 0:
+            raise ValueError(
+                "Dynamic sampling buffer capacity must be a multiple of train batch size"
+            )
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,7 @@ def rollout(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    max_new_tokens: int,
 ) -> Experience:
     messages = environment.prompt()
     inputs = tokenizer.apply_chat_template(
@@ -87,7 +99,7 @@ def rollout(
     ).to(device)  # type: ignore
     model_output: GenerateDecoderOnlyOutput = model.generate(
         inputs,
-        max_new_tokens=MAX_ROLLOUT_TOKENS,
+        max_new_tokens=max_new_tokens,
         temperature=1,
         # both required to return the completion and the response logits
         output_logits=True,
@@ -155,6 +167,8 @@ def response_logits(
 def objective(
     model: PreTrainedModel,
     group: list[Experience],
+    epsilon_low: float,
+    epsilon_high: float,
 ) -> torch.Tensor:
     rewards = torch.Tensor([experience.reward for experience in group])
     mean_reward = rewards.mean().item()
@@ -171,7 +185,7 @@ def objective(
         # probabilities, not the log probs. We operate in log space for
         # numerical stability.
         importance = torch.exp(log_probs - experience.log_probs)  # T
-        clip_importance = torch.clip(importance, 1 - EPSILON_LOW, 1 + EPSILON_HIGH)  # T
+        clip_importance = torch.clip(importance, 1 - epsilon_low, 1 + epsilon_high)  # T
 
         return torch.minimum(importance * advantage, clip_importance * advantage)  # T
 
@@ -185,18 +199,22 @@ def train(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    config: TrainConfig,
 ) -> None:
-    model.to(device)  # type: ignore
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6, maximize=True)
     lr_scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=5,
-        num_training_steps=TRAIN_STEPS * DYNAMIC_SAMPLING_BUFFER_CAPACITY,
+        num_training_steps=config.train_steps
+        * config.dynamic_sampling_buffer_capacity
+        // config.train_batch_size,
     )
-    dynamic_sampling_buffer = DynamicSamplingBuffer(DYNAMIC_SAMPLING_BUFFER_CAPACITY)
+    dynamic_sampling_buffer = DynamicSamplingBuffer(
+        config.dynamic_sampling_buffer_capacity
+    )
 
-    for step in range(TRAIN_STEPS):
+    for step in range(config.train_steps):
         # Populate the dynamic sampling buffer ith rollout groups. In "real"
         # implementations, this would happen in parallel with training, though
         # we keep things sequential here for simplicity.
@@ -205,8 +223,10 @@ def train(
         with torch.no_grad():
             while not dynamic_sampling_buffer.full():
                 group = [
-                    rollout(device, model, tokenizer, environment)
-                    for _ in range(GROUP_SIZE)
+                    rollout(
+                        device, model, tokenizer, environment, config.max_rollout_tokens
+                    )
+                    for _ in range(config.group_size)
                 ]
                 # Dynamic sampling: we only add groups that have reward
                 # diversity. Note: as we don't have a binary reward, we check
@@ -218,21 +238,26 @@ def train(
                 print("Dynamic sampling: accepting group.")
                 dynamic_sampling_buffer.push(group)
 
-        # Perform gradient steps from groups in the dynamic sampling buffer.
-        # For each gradient step in this loop, the training will stray further
-        # off-policy.
+        # Perform batched gradient steps from groups in the dynamic sampling
+        # buffer. For each gradient step in this loop, the training will stray
+        # further off-policy.
         print("-- Training")
         model.train()
         while len(dynamic_sampling_buffer) > 0:
-            groups = [dynamic_sampling_buffer.pop() for _ in range(TRAIN_BATCH_SIZE)]
-            group_objectives = [objective(model, group) for group in groups]
-            batch_objective = torch.stack(group_objectives).sum()
+            groups = [
+                dynamic_sampling_buffer.pop() for _ in range(config.train_batch_size)
+            ]
+            batch_objectives = [
+                objective(model, group, config.epsilon_low, config.epsilon_high)
+                for group in groups
+            ]
+            batch_objective = torch.stack(batch_objectives).sum()
             batch_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             print(
-                f"Grad step for group batch in train step {step + 1}/{TRAIN_STEPS} completed. "
+                f"Grad step for group batch in train step {step + 1}/{config.train_steps} completed. "
                 f"Batch objective: {batch_objective.item():.6f}. "
                 f"{len(dynamic_sampling_buffer)}/{dynamic_sampling_buffer.capacity} groups remain in dynamic sampling buffer."
             )
@@ -241,13 +266,24 @@ def train(
 def main() -> None:
     torch.manual_seed(42)
     random.seed(42)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model_name = "Qwen/Qwen3-0.6B"
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model.to(device)  # type: ignore
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     environment = Environment()
+    train_config = TrainConfig(
+        group_size=6,
+        max_rollout_tokens=4,
+        train_steps=4,
+        train_batch_size=2,
+        dynamic_sampling_buffer_capacity=6,
+        epsilon_low=0.2,
+        epsilon_high=0.28,
+    )
 
-    train(device, model, tokenizer, environment)
+    train(device, model, tokenizer, environment, train_config)
 
 
 if __name__ == "__main__":
