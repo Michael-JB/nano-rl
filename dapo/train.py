@@ -15,14 +15,17 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 from environment import Environment
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-ROLLOUT_COUNT = 25  # Number of valid samples to add to the replay buffer per step (implementation detail)
-GROUP_SIZE = 5  # The number of experiences to contribute to a single gradient step
+GROUP_SIZE = 6  # The number of experiences to sample
 MAX_ROLLOUT_TOKENS = 4  # The maximum number of response tokens that the model can generate during rollouts
-TRAIN_STEPS = 6  # The number of training steps; we only do rollouts once per train step
-GRAD_UPDATES_PER_STEP = 5  # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
-REPLAY_BUFFER_CAPACITY = 60  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
+TRAIN_STEPS = 4  # The number of training steps; we only do rollouts once per train step
+TRAIN_BATCH_SIZE = 2  # The number of groups to process in a single gradient step
+DYNAMIC_SAMPLING_BUFFER_CAPACITY = (
+    6  # The number of groups the dynamic sampling buffer can hold
+)
 EPSILON_LOW = 0.2  # The epsilon_low term in the DAPO objective
 EPSILON_HIGH = 0.28  # The epsilon_high term in the DAPO objective
+
+assert DYNAMIC_SAMPLING_BUFFER_CAPACITY % TRAIN_BATCH_SIZE == 0
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class Experience:
     # tokens with `False` and response tokens with `True`.
     prompt_mask: list[bool]
     # A 1-dimensional tensor of the log probabilities of the response tokens.
+    # We don't need gradients here.
     log_probs: torch.Tensor
     # A float reward for the response.
     reward: float
@@ -42,26 +46,26 @@ class Experience:
         return self.completion[self.prompt_mask]
 
 
-class ReplayBuffer:
+class DynamicSamplingBuffer:
     """
-    The replay buffer is a ring-buffer for experiences. It stores up to
-    `capacity` experiences. When new experiences are pushed, the oldest
-    experiences are discarded to satisfy the capacity. You can access these
-    experiences by calling `sample`; this samples experiences uniformly at
-    random from the whole buffer.
+    The dynamic sampling buffer holds groups of experiences. It can hold up to
+    `capacity` groups.
     """
 
     def __init__(self, capacity: int) -> None:
         self.capacity = capacity
-        self.buffer: deque[Experience] = deque(maxlen=capacity)
+        self.buffer: deque[list[Experience]] = deque()
 
     def push(self, experiences: list[Experience]) -> None:
-        self.buffer.extend(experiences)
+        if self.full():
+            raise RuntimeError("Dynamic sampling buffer is full")
+        self.buffer.append(experiences)
 
-    def sample(self, count: int) -> list[Experience]:
-        if len(self.buffer) < count:
-            raise ValueError("Failed to sample; insufficient buffer entries")
-        return random.sample(list(self.buffer), count)
+    def pop(self) -> list[Experience]:
+        return self.buffer.pop()
+
+    def full(self) -> bool:
+        return len(self.buffer) == self.capacity
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -154,11 +158,10 @@ def objective(
 ) -> torch.Tensor:
     rewards = torch.Tensor([experience.reward for experience in group])
     mean_reward = rewards.mean().item()
-    std_reward = (
-        rewards.std().item()
-    )  # DAPO dynamic sampling guarantees this will never be 0
+    std_reward = rewards.std().item()
 
     def experience_objective(experience: Experience) -> torch.Tensor:
+        # DAPO dynamic sampling guarantees that std_reward will never be 0
         advantage = (experience.reward - mean_reward) / std_reward
 
         logits = response_logits(model, experience)
@@ -189,47 +192,49 @@ def train(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=5,
-        num_training_steps=TRAIN_STEPS * GRAD_UPDATES_PER_STEP,
+        num_training_steps=TRAIN_STEPS * DYNAMIC_SAMPLING_BUFFER_CAPACITY,
     )
-    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
+    dynamic_sampling_buffer = DynamicSamplingBuffer(DYNAMIC_SAMPLING_BUFFER_CAPACITY)
 
     for step in range(TRAIN_STEPS):
-        # Populate the replay buffer with rollouts. In "real" implementations,
-        # this would happen in parallel with training, though we keep things
-        # sequential here for simplicity.
+        # Populate the dynamic sampling buffer ith rollout groups. In "real"
+        # implementations, this would happen in parallel with training, though
+        # we keep things sequential here for simplicity.
         print("-- Generating rollouts")
         model.eval()
         with torch.no_grad():
-            experiences = [
-                rollout(device, model, tokenizer, environment)
-                for _ in range(ROLLOUT_COUNT)
-            ]
-            replay_buffer.push(experiences)
+            while not dynamic_sampling_buffer.full():
+                group = [
+                    rollout(device, model, tokenizer, environment)
+                    for _ in range(GROUP_SIZE)
+                ]
+                # Dynamic sampling: we only add groups that have reward
+                # diversity. Note: as we don't have a binary reward, we check
+                # for all-equal rewards rather than for all-1 rewards as the
+                # DAPO objective describes.
+                if len(set([experience.reward for experience in group])) == 1:
+                    print("Dynamic sampling: rejecting group with no reward diversity.")
+                    continue
+                print("Dynamic sampling: accepting group.")
+                dynamic_sampling_buffer.push(group)
 
-        # Perform gradient steps from samples in the replay buffer. For each
-        # gradient step in this loop, the training will stray further
+        # Perform gradient steps from groups in the dynamic sampling buffer.
+        # For each gradient step in this loop, the training will stray further
         # off-policy.
         print("-- Training")
         model.train()
-        for grad_step in range(GRAD_UPDATES_PER_STEP):
-            # Dynamic sampling: we continuously re-sample from the replay
-            # buffer until we have reward diversity in our group. Note: as we
-            # don't have a binary reward, we check for all-equal rewards rather
-            # than for all-1 rewards as the DAPO objective describes.
-            group = replay_buffer.sample(GROUP_SIZE)
-            while len(set([experience.reward for experience in group])) == 1:
-                print("Sampled group would give no learning signal; resampling...")
-                group = replay_buffer.sample(GROUP_SIZE)
-
-            group_objective = objective(model, group)
-            group_objective.backward()
+        while len(dynamic_sampling_buffer) > 0:
+            groups = [dynamic_sampling_buffer.pop() for _ in range(TRAIN_BATCH_SIZE)]
+            group_objectives = [objective(model, group) for group in groups]
+            batch_objective = torch.stack(group_objectives).sum()
+            batch_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             print(
-                f"Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
-                f"in train step {step + 1}/{TRAIN_STEPS} completed. "
-                f"Objective: {group_objective.item():.6f}"
+                f"Grad step for group batch in train step {step + 1}/{TRAIN_STEPS} completed. "
+                f"Batch objective: {batch_objective.item():.6f}. "
+                f"{len(dynamic_sampling_buffer)}/{dynamic_sampling_buffer.capacity} groups remain in dynamic sampling buffer."
             )
 
 
