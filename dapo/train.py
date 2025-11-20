@@ -87,7 +87,7 @@ def rollout(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
-    max_new_tokens: int,
+    max_response_tokens: int,
 ) -> Experience:
     messages = environment.prompt()
     inputs = tokenizer.apply_chat_template(
@@ -99,7 +99,7 @@ def rollout(
     ).to(device)  # type: ignore
     model_output: GenerateDecoderOnlyOutput = model.generate(
         inputs,
-        max_new_tokens=max_new_tokens,
+        max_new_tokens=max_response_tokens,
         temperature=1,
         # both required to return the completion and the response logits
         output_logits=True,

@@ -18,14 +18,7 @@ def model_accuracy(
     rollout_count: int = 10,
 ) -> float:
     rollouts = [
-        rollout(
-            device=device,
-            model=model,
-            tokenizer=tokenizer,
-            environment=environment,
-            max_new_tokens=4,
-        )
-        for _ in range(rollout_count)
+        rollout(device, model, tokenizer, environment, 4) for _ in range(rollout_count)
     ]
     responses = [
         tokenizer.decode(rollout.response, skip_special_tokens=True)
