@@ -14,14 +14,23 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from environment import Environment
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
-ROLLOUT_COUNT = 25  # Number of rollouts per step
-GROUP_SIZE = 5  # The number of experiences to contribute to a single gradient step
-MAX_ROLLOUT_TOKENS = 10  # The maximum number of response tokens that the model can generate during rollouts
-TRAIN_STEPS = 5  # The number of training steps; we only do rollouts once per train step
-GRAD_UPDATES_PER_STEP = 5  # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
-REPLAY_BUFFER_CAPACITY = 50  # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
-EPSILON = 0.2  # The epsilon term in the GRPO objective
+
+@dataclass
+class TrainConfig:
+    # The number of rollouts per step
+    rollout_count: int
+    # The number of experiences to contribute to a single gradient step
+    group_size: int
+    # The maximum number of response tokens that the model can generate during rollouts
+    max_rollout_tokens: int
+    # The number of training steps; we only do rollouts once per train step
+    train_steps: int
+    # The number of gradient update steps per train step. If this is greater than 1, we will go off-policy
+    grad_updates_per_step: int
+    # The maximum number of elements in the replay buffer. The larger this is, the more off-policy the training can go
+    replay_buffer_capacity: int
+    # The epsilon term in the GRPO objective
+    epsilon: float
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,7 @@ def rollout(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    max_response_tokens: int,
 ) -> Experience:
     messages = environment.prompt()
     inputs = tokenizer.apply_chat_template(
@@ -83,7 +93,7 @@ def rollout(
     ).to(device)  # type: ignore
     model_output: GenerateDecoderOnlyOutput = model.generate(
         inputs,
-        max_new_tokens=MAX_ROLLOUT_TOKENS,
+        max_new_tokens=max_response_tokens,
         temperature=1,
         # both required to return the completion and the response logits
         output_logits=True,
@@ -153,6 +163,7 @@ def response_logits(
 def objective(
     model: PreTrainedModel,
     group: list[Experience],
+    epsilon: float,
 ) -> torch.Tensor:
     rewards = torch.Tensor([experience.reward for experience in group])
     mean_reward = rewards.mean().item()
@@ -171,7 +182,7 @@ def objective(
         # probabilities, not the log probs. We operate in log space for
         # numerical stability.
         importance = torch.exp(log_probs_sum - experience.log_probs_sum)
-        clipped_importance = torch.clip(importance, 1 - EPSILON, 1 + EPSILON)
+        clipped_importance = torch.clip(importance, 1 - epsilon, 1 + epsilon)
 
         return torch.min(importance * advantage, clipped_importance * advantage)
 
@@ -187,6 +198,7 @@ def train(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     environment: Environment,
+    config: TrainConfig,
 ) -> None:
     model.to(device)  # type: ignore
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6, maximize=True)
@@ -194,11 +206,11 @@ def train(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=5,
-        num_training_steps=TRAIN_STEPS * GRAD_UPDATES_PER_STEP,
+        num_training_steps=config.train_steps * config.grad_updates_per_step,
     )
-    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
+    replay_buffer = ReplayBuffer(config.replay_buffer_capacity)
 
-    for step in range(TRAIN_STEPS):
+    for step in range(config.train_steps):
         # Populate the replay buffer with rollouts. In "real" implementations,
         # this would happen in parallel with training, though we keep things
         # sequential here for simplicity.
@@ -206,8 +218,10 @@ def train(
         model.eval()
         with torch.no_grad():
             experiences = [
-                rollout(device, model, tokenizer, environment)
-                for _ in range(ROLLOUT_COUNT)
+                rollout(
+                    device, model, tokenizer, environment, config.max_rollout_tokens
+                )
+                for _ in range(config.rollout_count)
             ]
             replay_buffer.push(experiences)
 
@@ -216,16 +230,16 @@ def train(
         # off-policy.
         print("-- Training")
         model.train()
-        for grad_step in range(GRAD_UPDATES_PER_STEP):
-            group = replay_buffer.sample(GROUP_SIZE)
-            group_objective = objective(model, group)
+        for grad_step in range(config.grad_updates_per_step):
+            group = replay_buffer.sample(config.group_size)
+            group_objective = objective(model, group, config.epsilon)
             group_objective.backward()
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             print(
-                f"Grad step {grad_step + 1}/{GRAD_UPDATES_PER_STEP} "
-                f"in train step {step + 1}/{TRAIN_STEPS} completed. "
+                f"Grad step {grad_step + 1}/{config.grad_updates_per_step} "
+                f"in train step {step + 1}/{config.train_steps} completed. "
                 f"Objective: {group_objective.item():.6f}"
             )
 
@@ -233,13 +247,24 @@ def train(
 def main() -> None:
     torch.manual_seed(42)
     random.seed(42)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model_name = "Qwen/Qwen3-0.6B"
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model.to(device)  # type: ignore
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     environment = Environment()
+    train_config = TrainConfig(
+        rollout_count=25,
+        group_size=5,
+        max_rollout_tokens=10,
+        train_steps=5,
+        grad_updates_per_step=5,
+        replay_buffer_capacity=50,
+        epsilon=0.2,
+    )
 
-    train(device, model, tokenizer, environment)
+    train(device, model, tokenizer, environment, train_config)
 
 
 if __name__ == "__main__":
