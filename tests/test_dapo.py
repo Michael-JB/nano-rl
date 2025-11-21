@@ -22,7 +22,7 @@ def test_train(
         max_rollout_tokens=4,
         train_steps=4,
         train_batch_size=2,
-        dynamic_sampling_buffer_capacity=6,
+        group_count=6,
         epsilon_low=0.2,
         epsilon_high=0.28,
     )

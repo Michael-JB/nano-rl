@@ -25,18 +25,20 @@ class TrainConfig:
     train_steps: int
     # The number of groups to process in a single gradient step
     train_batch_size: int
-    # The number of groups the dynamic sampling buffer can hold
-    dynamic_sampling_buffer_capacity: int
+    # The number of groups to sample between training steps
+    group_count: int
     # The epsilon_low term in the DAPO objective
     epsilon_low: float
     # The epsilon_high term in the DAPO objective
     epsilon_high: float
 
     def __post_init__(self) -> None:
-        if self.dynamic_sampling_buffer_capacity % self.train_batch_size != 0:
-            raise ValueError(
-                "Dynamic sampling buffer capacity must be a multiple of train batch size"
-            )
+        if self.group_count % self.train_batch_size != 0:
+            raise ValueError("Group count must be a multiple of train batch size")
+
+    @property
+    def gradient_steps(self) -> int:
+        return self.train_steps * self.group_count // self.train_batch_size
 
 
 @dataclass(frozen=True)
@@ -206,13 +208,9 @@ def train(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=5,
-        num_training_steps=config.train_steps
-        * config.dynamic_sampling_buffer_capacity
-        // config.train_batch_size,
+        num_training_steps=config.gradient_steps,
     )
-    dynamic_sampling_buffer = DynamicSamplingBuffer(
-        config.dynamic_sampling_buffer_capacity
-    )
+    dynamic_sampling_buffer = DynamicSamplingBuffer(config.group_count)
 
     for step in range(config.train_steps):
         # Populate the dynamic sampling buffer ith rollout groups. In "real"
@@ -281,7 +279,7 @@ def main() -> None:
         max_rollout_tokens=4,
         train_steps=4,
         train_batch_size=2,
-        dynamic_sampling_buffer_capacity=6,
+        group_count=6,
         epsilon_low=0.2,
         epsilon_high=0.28,
     )
